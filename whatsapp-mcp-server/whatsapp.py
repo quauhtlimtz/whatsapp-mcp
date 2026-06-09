@@ -765,3 +765,115 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
         return None
+
+def monitor_chat(jid: str, label: Optional[str] = None) -> Tuple[bool, str]:
+    """Add a chat JID (person, group, or channel) to the bridge's monitoring allowlist."""
+    try:
+        response = requests.post(f"{WHATSAPP_API_BASE_URL}/monitor", json={"jid": jid, "label": label or ""})
+        result = response.json()
+        return result.get("success", False), result.get("message", "Unknown response")
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}. Is the WhatsApp bridge running?"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+def unmonitor_chat(jid: str) -> Tuple[bool, str]:
+    """Remove a chat JID from the bridge's monitoring allowlist."""
+    try:
+        response = requests.delete(f"{WHATSAPP_API_BASE_URL}/monitor", params={"jid": jid})
+        result = response.json()
+        return result.get("success", False), result.get("message", "Unknown response")
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}. Is the WhatsApp bridge running?"
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}"
+
+def list_monitored_chats() -> dict:
+    """List the bridge's monitoring allowlist."""
+    try:
+        response = requests.get(f"{WHATSAPP_API_BASE_URL}/monitor")
+        return response.json()
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Request error: {str(e)}. Is the WhatsApp bridge running?"}
+    except Exception as e:
+        return {"success": False, "message": f"Unexpected error: {str(e)}"}
+
+def wait_for_message(
+    chat_jid: Optional[str] = None,
+    sender_phone_number: Optional[str] = None,
+    content_pattern: Optional[str] = None,
+    from_me: Optional[bool] = None,
+    timeout_seconds: float = 30.0,
+    poll_interval_seconds: float = 0.5,
+) -> dict:
+    """Block until a new message matching the filters arrives, or time out.
+
+    Uses the messages table rowid as a baseline so it only ever matches
+    messages that arrive AFTER this call starts, regardless of timestamp
+    format or timezone.
+    """
+    import re
+    import time as time_module
+
+    compiled = None
+    if content_pattern:
+        try:
+            compiled = re.compile(content_pattern, re.IGNORECASE)
+        except re.error as e:
+            return {"success": False, "message": f"Invalid regex in content_pattern: {e}"}
+
+    try:
+        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COALESCE(MAX(rowid), 0) FROM messages")
+        baseline_rowid = cursor.fetchone()[0]
+
+        deadline = time_module.monotonic() + timeout_seconds
+        while time_module.monotonic() < deadline:
+            query = """
+                SELECT messages.rowid, messages.id, messages.chat_jid, messages.sender,
+                       messages.content, messages.timestamp, messages.is_from_me, messages.media_type
+                FROM messages
+                WHERE messages.rowid > ?
+            """
+            params: list = [baseline_rowid]
+            if chat_jid:
+                query += " AND messages.chat_jid = ?"
+                params.append(chat_jid)
+            if sender_phone_number:
+                query += " AND messages.sender = ?"
+                params.append(sender_phone_number)
+            if from_me is not None:
+                query += " AND messages.is_from_me = ?"
+                params.append(1 if from_me else 0)
+            query += " ORDER BY messages.rowid ASC"
+
+            cursor.execute(query, tuple(params))
+            for row in cursor.fetchall():
+                content = row[4] or ""
+                if compiled and not compiled.search(content):
+                    # Don't re-inspect this row on the next iteration
+                    baseline_rowid = max(baseline_rowid, row[0])
+                    continue
+                conn.close()
+                return {
+                    "success": True,
+                    "message": {
+                        "id": row[1],
+                        "chat_jid": row[2],
+                        "sender": row[3],
+                        "content": content,
+                        "timestamp": row[5],
+                        "is_from_me": bool(row[6]),
+                        "media_type": row[7],
+                    },
+                }
+            time_module.sleep(poll_interval_seconds)
+
+        conn.close()
+        return {
+            "success": False,
+            "message": f"Timed out after {timeout_seconds}s waiting for a matching message",
+        }
+    except Exception as e:
+        return {"success": False, "message": f"Unexpected error: {str(e)}"}

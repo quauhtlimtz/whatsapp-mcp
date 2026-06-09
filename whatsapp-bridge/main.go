@@ -84,6 +84,12 @@ func NewMessageStore() (*MessageStore, error) {
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
+
+		CREATE TABLE IF NOT EXISTS monitored_jids (
+			jid TEXT PRIMARY KEY,
+			label TEXT,
+			added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -96,6 +102,80 @@ func NewMessageStore() (*MessageStore, error) {
 // Close the database connection
 func (store *MessageStore) Close() error {
 	return store.db.Close()
+}
+
+// MonitoredJID represents an entry in the monitoring allowlist
+type MonitoredJID struct {
+	JID     string `json:"jid"`
+	Label   string `json:"label,omitempty"`
+	AddedAt string `json:"added_at,omitempty"`
+}
+
+// normalizeJID converts a bare phone number to a full JID. JIDs
+// (anything containing "@", e.g. groups @g.us or channels @newsletter)
+// are passed through unchanged.
+func normalizeJID(jid string) string {
+	jid = strings.TrimSpace(jid)
+	if jid != "" && !strings.Contains(jid, "@") {
+		return jid + "@s.whatsapp.net"
+	}
+	return jid
+}
+
+// AddMonitoredJID adds a JID to the monitoring allowlist
+func (store *MessageStore) AddMonitoredJID(jid, label string) error {
+	_, err := store.db.Exec(
+		"INSERT OR REPLACE INTO monitored_jids (jid, label) VALUES (?, ?)",
+		normalizeJID(jid), label,
+	)
+	return err
+}
+
+// RemoveMonitoredJID removes a JID from the monitoring allowlist
+func (store *MessageStore) RemoveMonitoredJID(jid string) (bool, error) {
+	result, err := store.db.Exec("DELETE FROM monitored_jids WHERE jid = ?", normalizeJID(jid))
+	if err != nil {
+		return false, err
+	}
+	rows, _ := result.RowsAffected()
+	return rows > 0, nil
+}
+
+// ListMonitoredJIDs returns all entries in the monitoring allowlist
+func (store *MessageStore) ListMonitoredJIDs() ([]MonitoredJID, error) {
+	rows, err := store.db.Query("SELECT jid, COALESCE(label, ''), COALESCE(added_at, '') FROM monitored_jids ORDER BY added_at")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	jids := []MonitoredJID{}
+	for rows.Next() {
+		var m MonitoredJID
+		if err := rows.Scan(&m.JID, &m.Label, &m.AddedAt); err != nil {
+			return nil, err
+		}
+		jids = append(jids, m)
+	}
+	return jids, rows.Err()
+}
+
+// ShouldStoreChat reports whether messages for the given chat JID should
+// be stored. If the allowlist is empty, all chats are stored (the original
+// behavior). Otherwise only allowlisted JIDs are stored.
+func (store *MessageStore) ShouldStoreChat(chatJID string) bool {
+	var count int
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM monitored_jids").Scan(&count); err != nil {
+		return true // fail open: never silently drop messages on DB errors
+	}
+	if count == 0 {
+		return true
+	}
+	var matched int
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM monitored_jids WHERE jid = ?", chatJID).Scan(&matched); err != nil {
+		return true
+	}
+	return matched > 0
 }
 
 // Store a chat in the database
@@ -413,6 +493,11 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// Save message to database
 	chatJID := msg.Info.Chat.String()
 	sender := msg.Info.Sender.User
+
+	// Skip chats outside the monitoring allowlist (no-op if allowlist is empty)
+	if !messageStore.ShouldStoreChat(chatJID) {
+		return
+	}
 
 	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages)
 	name := GetChatName(client, messageStore, msg.Info.Chat, chatJID, nil, sender, logger)
@@ -774,6 +859,74 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		})
 	})
 
+	// Handler for the monitoring allowlist.
+	// GET    /api/monitor          -> list monitored JIDs
+	// POST   /api/monitor          -> add a JID  (body: {"jid": "...", "label": "..."})
+	// DELETE /api/monitor?jid=...  -> remove a JID
+	// When the allowlist is empty, ALL chats are stored (original behavior).
+	// When non-empty, only messages from allowlisted JIDs are stored.
+	http.HandleFunc("/api/monitor", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.Method {
+		case http.MethodGet:
+			jids, err := messageStore.ListMonitoredJIDs()
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":        true,
+				"monitored_jids": jids,
+				"filter_active":  len(jids) > 0,
+			})
+
+		case http.MethodPost:
+			var req MonitoredJID
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.JID) == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Body must be JSON with a non-empty 'jid' field"})
+				return
+			}
+			if err := messageStore.AddMonitoredJID(req.JID, req.Label); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"message": fmt.Sprintf("Now monitoring %s", normalizeJID(req.JID)),
+			})
+
+		case http.MethodDelete:
+			jid := r.URL.Query().Get("jid")
+			if strings.TrimSpace(jid) == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "Query parameter 'jid' is required"})
+				return
+			}
+			removed, err := messageStore.RemoveMonitoredJID(jid)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
+				return
+			}
+			if !removed {
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": fmt.Sprintf("%s was not in the allowlist", normalizeJID(jid))})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"message": fmt.Sprintf("Stopped monitoring %s", normalizeJID(jid)),
+			})
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
 	// Start the server
 	serverAddr := fmt.Sprintf(":%d", port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
@@ -1022,6 +1175,11 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 		jid, err := types.ParseJID(chatJID)
 		if err != nil {
 			logger.Warnf("Failed to parse JID %s: %v", chatJID, err)
+			continue
+		}
+
+		// Skip chats outside the monitoring allowlist (no-op if allowlist is empty)
+		if !messageStore.ShouldStoreChat(chatJID) {
 			continue
 		}
 

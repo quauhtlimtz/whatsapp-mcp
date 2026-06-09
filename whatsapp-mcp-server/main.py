@@ -12,7 +12,11 @@ from whatsapp import (
     send_message as whatsapp_send_message,
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
-    download_media as whatsapp_download_media
+    download_media as whatsapp_download_media,
+    monitor_chat as whatsapp_monitor_chat,
+    unmonitor_chat as whatsapp_unmonitor_chat,
+    list_monitored_chats as whatsapp_list_monitored_chats,
+    wait_for_message as whatsapp_wait_for_message
 )
 
 # Initialize FastMCP server
@@ -245,6 +249,63 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
             "success": False,
             "message": "Failed to download media"
         }
+
+@mcp.tool()
+def monitor_chat(jid: str, label: str = "") -> Dict[str, Any]:
+    """Add a chat to the monitoring allowlist. While the allowlist is non-empty,
+    the bridge ONLY stores messages from allowlisted chats; when empty, it stores everything.
+
+    Args:
+        jid: Phone number with country code (no + or symbols), or a full JID:
+             person ("123456789@s.whatsapp.net"), group ("123456789@g.us"),
+             or WhatsApp Channel ("123456789@newsletter")
+        label: Optional human-readable label for this entry (e.g. "staging test number")
+    """
+    success, message = whatsapp_monitor_chat(jid, label)
+    return {"success": success, "message": message}
+
+@mcp.tool()
+def unmonitor_chat(jid: str) -> Dict[str, Any]:
+    """Remove a chat from the monitoring allowlist. If the allowlist becomes empty,
+    the bridge goes back to storing messages from ALL chats.
+
+    Args:
+        jid: The phone number or JID to stop monitoring
+    """
+    success, message = whatsapp_unmonitor_chat(jid)
+    return {"success": success, "message": message}
+
+@mcp.tool()
+def list_monitored_chats() -> Dict[str, Any]:
+    """List the monitoring allowlist and whether filtering is currently active."""
+    return whatsapp_list_monitored_chats()
+
+@mcp.tool()
+def wait_for_message(
+    chat_jid: str = "",
+    sender_phone_number: str = "",
+    content_pattern: str = "",
+    from_me: Optional[bool] = None,
+    timeout_seconds: float = 30.0,
+) -> Dict[str, Any]:
+    """Block until a NEW message matching the filters arrives, or time out.
+    Only matches messages that arrive after this call starts. Designed for
+    E2E test flows: send a message, then wait for the expected reply.
+
+    Args:
+        chat_jid: Optional chat JID to watch (person, group, or channel)
+        sender_phone_number: Optional sender phone number filter
+        content_pattern: Optional case-insensitive regex the message content must match
+        from_me: Optional filter: True = only own messages, False = only incoming
+        timeout_seconds: How long to wait before giving up (default 30)
+    """
+    return whatsapp_wait_for_message(
+        chat_jid=chat_jid or None,
+        sender_phone_number=sender_phone_number or None,
+        content_pattern=content_pattern or None,
+        from_me=from_me,
+        timeout_seconds=timeout_seconds,
+    )
 
 if __name__ == "__main__":
     # Initialize and run the server
