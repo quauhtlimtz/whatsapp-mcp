@@ -1,5 +1,7 @@
 # WhatsApp MCP Server
 
+> **About this project:** This is an actively maintained fork of [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp), which appears to be no longer maintained. Full credit for the original design and implementation goes to [Luke Harries](https://github.com/lharries). This fork keeps the bridge working against current WhatsApp servers (the original fails with `Client outdated (405)` errors) and will receive new features and improvements over time — see [Changes from the original](#changes-from-the-original) and [Roadmap](#roadmap).
+
 This is a Model Context Protocol (MCP) server for WhatsApp.
 
 With this you can search and read your personal Whatsapp messages (including images, videos, documents, and audio messages), search your contacts and send messages to either individuals or groups. You can also send media files including images, videos, documents, and audio messages.
@@ -10,7 +12,22 @@ Here's an example of what you can do when it's connected to Claude.
 
 ![WhatsApp MCP](./example-use.png)
 
-> To get updates on this and other projects I work on [enter your email here](https://docs.google.com/forms/d/1rTF9wMBTN0vPfzWuQa2BjfGKdKIpTbyeKxhPMcEzgyI/preview)
+## Changes from the original
+
+- **Fixed `Client outdated (405) connect failure`** — WhatsApp servers reject stale client versions after a few months. The [whatsmeow](https://github.com/tulir/whatsmeow) dependency is kept up to date (currently the 2026-06-09 snapshot) so the bridge can connect.
+- **Updated to the current whatsmeow `context.Context` API** — the bridge code was adapted to the breaking API changes introduced upstream, so it builds cleanly against recent whatsmeow versions.
+- **Dependency refresh** — transitive dependencies (`libsignal`, `go.mau.fi/util`, `golang.org/x/*`, `go-sqlite3`, etc.) updated alongside whatsmeow.
+
+> **Maintenance note:** WhatsApp expires old client versions roughly every 3–4 months. If you ever see the 405 error again, update whatsmeow and rebuild:
+>
+> ```bash
+> cd whatsapp-bridge
+> go get -u go.mau.fi/whatsmeow@latest && go mod tidy
+> ```
+
+## Roadmap
+
+This fork will receive improvements over time. Planned and candidate items are tracked in [Issues](https://github.com/quauhtlimtz/whatsapp-mcp/issues). Contributions and suggestions are welcome.
 
 > *Caution:* as with many MCP servers, the WhatsApp MCP is subject to [the lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/). This means that project injection could lead to private data exfiltration.
 
@@ -29,7 +46,7 @@ Here's an example of what you can do when it's connected to Claude.
 1. **Clone this repository**
 
    ```bash
-   git clone https://github.com/lharries/whatsapp-mcp.git
+   git clone https://github.com/quauhtlimtz/whatsapp-mcp.git
    cd whatsapp-mcp
    ```
 
