@@ -17,6 +17,8 @@ Here's an example of what you can do when it's connected to Claude.
 - **Fixed `Client outdated (405) connect failure`** — WhatsApp servers reject stale client versions after a few months. The [whatsmeow](https://github.com/tulir/whatsmeow) dependency is kept up to date (currently the 2026-06-09 snapshot) so the bridge can connect.
 - **Updated to the current whatsmeow `context.Context` API** — the bridge code was adapted to the breaking API changes introduced upstream, so it builds cleanly against recent whatsmeow versions.
 - **Dependency refresh** — transitive dependencies (`libsignal`, `go.mau.fi/util`, `golang.org/x/*`, `go-sqlite3`, etc.) updated alongside whatsmeow.
+- **Chat monitoring allowlist** — restrict which chats (1:1, groups, or WhatsApp Channels) the bridge stores, configurable at runtime via REST or MCP tools. See [Chat monitoring & E2E testing](#chat-monitoring--e2e-testing).
+- **`wait_for_message` tool** — block until a new message matching given filters arrives (chat, sender, regex on content), with a timeout. Built for E2E test flows: send a message, then assert on the reply.
 
 > **Maintenance note:** WhatsApp expires old client versions roughly every 3–4 months. If you ever see the 405 error again, update whatsmeow and rebuild:
 >
@@ -157,6 +159,41 @@ Claude can access the following tools to interact with WhatsApp:
 - **send_file**: Send a file (image, video, raw audio, document) to a specified recipient
 - **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
 - **download_media**: Download media from a WhatsApp message and get the local file path
+- **monitor_chat**: Add a chat (person, group, or channel) to the monitoring allowlist
+- **unmonitor_chat**: Remove a chat from the monitoring allowlist
+- **list_monitored_chats**: List the allowlist and whether filtering is active
+- **wait_for_message**: Block until a new message matching the given filters arrives, or time out
+
+## Chat monitoring & E2E testing
+
+By default the bridge stores **every** chat. For automated testing (e.g. running E2E tests against a system that replies over WhatsApp) you usually want to watch only specific numbers, groups, or channels. Add entries to the monitoring allowlist and the bridge will store **only** those chats; remove all entries to go back to storing everything.
+
+JIDs can be a bare phone number (normalized to `@s.whatsapp.net`), a group (`...@g.us`), or a WhatsApp Channel (`...@newsletter` — your account must follow the channel to receive its messages).
+
+The allowlist is configurable through the MCP tools above, or directly via the bridge REST API so your test suite doesn't need to go through an LLM:
+
+```bash
+# Add a number and a channel to the allowlist
+curl -X POST localhost:8080/api/monitor -d '{"jid": "5215512345678", "label": "staging bot"}'
+curl -X POST localhost:8080/api/monitor -d '{"jid": "120363123456789@newsletter", "label": "status channel"}'
+
+# Inspect the allowlist
+curl localhost:8080/api/monitor
+
+# Remove an entry (empty allowlist = store all chats again)
+curl -X DELETE 'localhost:8080/api/monitor?jid=5215512345678'
+```
+
+A typical E2E assertion combines `send_message` with `wait_for_message`:
+
+1. `send_message` to your system under test
+2. `wait_for_message(chat_jid=..., content_pattern="expected reply", timeout_seconds=30)`
+3. The tool returns the matching message, or a timeout error
+
+Notes:
+- `wait_for_message` only matches messages that arrive *after* the call starts (it uses the database rowid as a baseline, so timestamp formats and timezones don't matter).
+- Filtering happens at ingestion: while the allowlist is active, messages from other chats are **not stored at all**. History sync is filtered the same way.
+- *Caution:* automating a personal WhatsApp account is against WhatsApp's Terms of Service and bot-like traffic patterns can get a number banned. Use a dedicated test number and keep message volume low.
 
 ### Media Handling Features
 
