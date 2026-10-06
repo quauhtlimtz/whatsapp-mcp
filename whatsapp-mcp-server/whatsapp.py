@@ -622,7 +622,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
         if 'conn' in locals():
             conn.close()
 
-def send_message(recipient: str, message: str) -> Tuple[bool, str]:
+def send_message(recipient: str, message: str, reply_id: str = None, reply_type: str = None, context_id: str = None) -> Tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
@@ -633,6 +633,15 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
             "recipient": recipient,
             "message": message,
         }
+        # Interactive reply simulation: delivers a real list/button reply carrying
+        # the option id, so the receiver sees list_reply.id like a genuine tap.
+        if reply_id:
+            payload["reply_id"] = reply_id
+            payload["reply_type"] = reply_type or "list"
+            # Stanza id of the original interactive message. WhatsApp rejects a
+            # reply that does not reference a real message (server error 479).
+            if context_id:
+                payload["context_id"] = context_id
         
         response = requests.post(url, json=payload)
         

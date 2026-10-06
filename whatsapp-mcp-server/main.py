@@ -161,14 +161,29 @@ def get_message_context(
 @mcp.tool()
 def send_message(
     recipient: str,
-    message: str
+    message: str,
+    reply_id: str = None,
+    reply_type: str = None,
+    context_id: str = None
 ) -> Dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
 
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
-        message: The message text to send
+        message: The message text to send. When reply_id is set, this is the visible
+                 label of the tapped option (the title shown in the chat bubble).
+        reply_id: Optional. Simulates the user TAPPING an interactive option instead of
+                 typing. Send the option's id (e.g. "intent_recargar", "menu_principal").
+                 The receiver then gets metadata.list_reply.id exactly as a real tap
+                 produces, rather than plain text.
+        reply_type: Optional. "list" (default) for list-row replies, "button" for
+                 quick-reply buttons.
+        context_id: Stanza id of the ORIGINAL interactive message being replied to.
+                 REQUIRED when reply_id is set — WhatsApp rejects an interactive
+                 reply that references no real message (server error 479). It is the
+                 hex tail of the original message's wamid (decode the base64 after
+                 "wamid." and take the trailing hex run).
     
     Returns:
         A dictionary containing success status and a status message
@@ -181,7 +196,7 @@ def send_message(
         }
     
     # Call the whatsapp_send_message function with the unified recipient parameter
-    success, status_message = whatsapp_send_message(recipient, message)
+    success, status_message = whatsapp_send_message(recipient, message, reply_id, reply_type, context_id)
     return {
         "success": success,
         "message": status_message
