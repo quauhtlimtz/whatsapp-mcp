@@ -280,10 +280,27 @@ type SendMessageRequest struct {
 	Recipient string `json:"recipient"`
 	Message   string `json:"message"`
 	MediaPath string `json:"media_path,omitempty"`
+	// Interactive reply simulation: when set, the message is sent as a real
+	// list/button reply carrying the option id, exactly as tapping it would.
+	// reply_type: "list" (default when reply_id is set) or "button".
+	ReplyID   string `json:"reply_id,omitempty"`
+	ReplyType string `json:"reply_type,omitempty"`
+	// Stanza id of the ORIGINAL interactive message being replied to. WhatsApp
+	// rejects a list/button reply that does not reference a real message (err 479).
+	ContextID string `json:"context_id,omitempty"`
 }
 
 // Function to send a WhatsApp message
 func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+	return sendWhatsAppMessageEx(client, recipient, message, mediaPath, "", "", "")
+}
+
+// sendWhatsAppMessageEx is sendWhatsAppMessage plus optional interactive-reply
+// simulation. When replyID is non-empty the message is delivered as a genuine
+// list/button reply (ListResponseMessage / ButtonsResponseMessage) so the
+// receiving system sees metadata.list_reply.id — the same payload a real tap
+// produces — instead of plain text.
+func sendWhatsAppMessageEx(client *whatsmeow.Client, recipient string, message string, mediaPath string, replyID string, replyType string, contextID string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -435,6 +452,39 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 				FileEncSHA256: resp.FileEncSHA256,
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    &resp.FileLength,
+			}
+		}
+	} else if replyID != "" {
+		// WhatsApp validates that an interactive reply references the original
+		// message; without it the server rejects the stanza (error 479).
+		var ctxInfo *waProto.ContextInfo
+		if contextID != "" {
+			selfJID := client.Store.ID.ToNonAD().String()
+			ctxInfo = &waProto.ContextInfo{
+				StanzaID:    proto.String(contextID),
+				Participant: proto.String(recipientJID.String()),
+				RemoteJID:   proto.String(selfJID),
+			}
+		}
+		// Interactive reply: emit the same protobuf a real tap produces, so the
+		// receiver gets the option id rather than the rendered label text.
+		if replyType == "button" {
+			msg.ButtonsResponseMessage = &waProto.ButtonsResponseMessage{
+				SelectedButtonID: proto.String(replyID),
+				Type:             waProto.ButtonsResponseMessage_DISPLAY_TEXT.Enum(),
+				Response: &waProto.ButtonsResponseMessage_SelectedDisplayText{
+					SelectedDisplayText: message,
+				},
+				ContextInfo: ctxInfo,
+			}
+		} else {
+			msg.ListResponseMessage = &waProto.ListResponseMessage{
+				Title:    proto.String(message),
+				ListType: waProto.ListResponseMessage_SINGLE_SELECT.Enum(),
+				SingleSelectReply: &waProto.ListResponseMessage_SingleSelectReply{
+					SelectedRowID: proto.String(replyID),
+				},
+				ContextInfo: ctxInfo,
 			}
 		}
 	} else {
@@ -783,15 +833,15 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			return
 		}
 
-		if req.Message == "" && req.MediaPath == "" {
+		if req.Message == "" && req.MediaPath == "" && req.ReplyID == "" {
 			http.Error(w, "Message or media path is required", http.StatusBadRequest)
 			return
 		}
 
-		fmt.Println("Received request to send message", req.Message, req.MediaPath)
+		fmt.Println("Received request to send message", req.Message, req.MediaPath, req.ReplyID)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessageEx(client, req.Recipient, req.Message, req.MediaPath, req.ReplyID, req.ReplyType, req.ContextID)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
